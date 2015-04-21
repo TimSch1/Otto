@@ -89,10 +89,6 @@ for(j in 1:93){
 #subset = pca.coords[idx, ]
 #subset$targets = targets[idx]
 
-library(GGally)
-#ggpairs(subset, columns = 1:4, color='targets', alpha=0.4,
- #       upper = list(continuous='density'),
-  #      lower = list(continuous='points'))
 
 
 #Build LogLoss evaluation metric used by Kaggle
@@ -107,105 +103,164 @@ LogLoss = function(data, lev=NULL, model=NULL){
     colidx = which(data$obs[i] == colnames(logProbs))
     out[i] = sum(logProbs[i,colidx], log1minus[i,-colidx])
     }
-  return(sum(out))
+  return(-sum(out)/length(out))
 }
 
-##from robert
-mcLogLoss <- function (data,
-                       lev = NULL,
-                       model = NULL) {
-  
-  if (!all(levels(data[, "pred"]) == levels(data[, "obs"])))
-    stop("levels of observed and predicted data do not match")
-  
-  LogLoss <- function(actual, pred, err=1e-15) {
-    pred[pred < err] <- err
-    pred[pred > 1 - err] <- 1 - err
-    -1/nrow(actual)*(sum(actual*log(pred)))
-  }
-  
-  dtest <- dummyVars(~obs, data=data, levelsOnly=TRUE)
-  actualClasses <- predict(dtest, data[,-1])
-  
-  out <- LogLoss(actualClasses, data[,-c(1:2)])  
-  names(out) <- "mcLogLoss"
-  out
-} 
+##Unable to use caret for tuning parameter search and model eval due to memory requirements/burden/leakage##
+##single gbm object ~1gb, only have 8gb##
+##Building parallelized function for model evaluation and tuning parameter selection##
+
+#data for competition
+train = read.csv('ottotrain.csv')
+test = read.csv('ottotest.csv')
+train = train[,-1]
+test = test[,-1]
 
 
-
-#generate stratified cross validation folds
-cv_fit = function(y, data, folds = 10, ...){
-  classes = vector('list', length(unique(y)))
-  cvfolds = vector('list', length(unique(y)))
-  for(i in 1:length(unique(y))){
-  classes[[i]] = which(y == unique(y)[i])
-  cvfolds[[i]] = sample(1:folds, size=length(classes[[i]]), replace=T)
-  }
-  scores = vector('integer')
-  for(i in 1:folds){
-    
-  }
-}
-idx = which(cvfolds[[1]] != 10)
-train = classes[[1]][idx]
-test = classes[[1]][-idx]
-
-#parallelize and build model using logloss fxn
-library(caret)
+#register parallel backend
 library(doParallel)
-cl = makeCluster(3)
-registerDoParallel(cl)
-gbmGrid = expand.grid(interaction.depth=1, 
-                      n.trees = 50, 
-                      shrinkage=0.1)
-
-fitControl = trainControl(method='cv', number=10, 
-                          classProbs=TRUE, summaryFunction = mcLogLoss)
-
-
-
-
-
-library(doParallel)
-cl = makeCluster(3)
+cl = makeCluster(4)
 registerDoParallel(cl)
 
-trees = c(100,150,200,250,300)
 
-tune = foreach(i = c(50,100), .packages='gbm') %dopar% {
-gbmMod = gbm(target~., data= train, distribution='multinomial', n.trees=i, interaction.depth=1, shrinkage = 0.01, n.cores=3)
-gbmPred = predict(gbmMod, train, n.trees=10, type='response')
-gbmPreddf = as.data.frame(gbmPred[,,1])
-gbmPreddf$obs = train$target
-LogLoss(gbmPreddf)
-}
-
-
-#this one now
+#no cv using logloss fxn, just holdout test set for model evaluation
 library(caret)
-idx = createDataPartition(train$target, p=0.75, list=FALSE)
+idx = createDataPartition(train$target, p=0.85, list=FALSE)
 train2 = train[idx,]
-test = train[-idx]
+test = train[-idx,]
 
-
-
-
+#initial gbm tuning parameters
 trees = c(100,150,200,250,300)
 depth = c(3,5,7)
 
+#tune over grid of parameters
 tune = foreach(i = trees, .packages='gbm') %:% 
   foreach(j = depth, .combine = 'rbind') %dopar% {
-  gbmMod = gbm(target~., data= train2, distribution='multinomial', n.trees=i, interaction.depth=j, shrinkage = 0.01, n.cores=3)
-  gbmPred = predict(gbmMod, test, n.trees=i, type='response')
+  gbmMod = gbm(target~., data= train2[,-1], distribution='multinomial', n.trees=i, 
+               interaction.depth=j, shrinkage = 0.01, n.cores=3)
+  gbmPred = predict(gbmMod, test[,-1], n.trees=i, type='response')
   gbmPreddf = as.data.frame(gbmPred[,,1])
-  gbmPreddf$obs = factor(test$target)
+  gbmPreddf$obs = test$target
   LogLoss(gbmPreddf)
 }
 
+#first model submission with best parameters chosen, unsurprisingly the are max trees (300) & depth (7)
+finalMod = gbm(target~., data= train[,-1], distribution='multinomial', n.trees=300, interaction.depth=7, shrinkage = 0.01, n.cores=3)
+##Results: first submission score 0.70854 - beats uniform probability:2.19, and rf benchmarks:1.50
+##best logloss was with highest number of trees and deepest depth, going to continue increasing trees/depth
+##features 1,3,6,10,12,13,21,27,28,29,31,37,46,49,51,52,61,63,65,66,73,74,80,81,82,87,89 have zero Var Imp.
 
 
+#new tuning parameters
+trees = c(350,400,450,500,550)
+depth = c(9,11)
 
+#second search in parameter space
+tune2 = foreach(i = trees, .packages='gbm') %:% 
+  foreach(j = depth, .combine = 'rbind') %dopar% {
+    gbmMod = gbm(target~., data= train2[,-1], distribution='multinomial', n.trees=i, 
+                 interaction.depth=j, shrinkage = 0.01, n.cores=3)
+    gbmPred = predict(gbmMod, test[,-1], n.trees=i, type='response')
+    gbmPreddf = as.data.frame(gbmPred[,,1])
+    gbmPreddf$obs = test$target
+    LogLoss(gbmPreddf)
+  }
 
+finalMod2 = gbm(target~., data= train[,-1], distribution='multinomial', n.trees=550, 
+                interaction.depth=11, shrinkage = 0.01, n.cores=4)
+
+#make submissions, only second output shown
+submit2 = predict(finalMod2, test[,-1], n.trees=550, type='response')
+submit2 = as.data.frame(submit1[,,1])
+write.csv(submit2, 'submit2.csv')
+finalMod2.varImp = summary(finalMod2)
+write.csv(finalMod2.varImp, 'submit2varImp.csv')
+##Results: second submission score 0.59317
+##best logloss was with highest number of trees and deepest depth, going to continue increasing trees/depth
+##6,12,21,27,28,31,37,52,63,82 zero var imp
+##gbm quickly becoming too computationally complex for my machine, switched to xgboost.
 
 stopCluster(cl)
+
+##xgboost - tuning. Tuned depth, then n.trees.
+
+library(xgboost)
+library(methods)
+
+train = read.csv('ottotrain.csv')
+test = read.csv('ottotest.csv')
+train = train[,-1]
+test = test[,-1]
+
+train$target = gsub('Class_', '', train$target)
+class = as.numeric(train$target) - 1
+train$target = NULL
+
+train = as.matrix(train)
+train = matrix(as.numeric(train), nrow = nrow(train), ncol=ncol(train))
+test = as.matrix(test)
+test = matrix(as.numeric(test), nrow=nrow(test))
+
+param <- list('objective' = 'multi:softprob',
+              'eval_metric' = 'mlogloss',
+              'num_class' = 9,
+              'nthread' = 4,
+              'max.depth' = 10)
+
+xgbmod.cv = xgb.cv(param=param, data = train, label = class, 
+                nfold = 3, nrounds=150)
+
+xgbfinalMod = xgboost(param=param, data = train, label = class, nrounds=53)
+
+# Make prediction
+submit4 = predict(xgbfinalMod,test)
+submit4 = matrix(submit4,9,length(submit4)/9)
+submit4 = t(submit4)
+submit4 = as.data.frame(submit4)
+submit4 = cbind(id = 1:nrow(submit4), submit4)
+names(submit4) = c('id', paste0('Class_',1:9))
+write.csv(submit4, file='submit4.csv', quote=FALSE,row.names=FALSE)
+
+##submission result using max.depth = 6, nround = 50 was 0.50763
+##submission results using max.depth = 10, nround = 57 was 0.47653
+
+##cv 3-fold tuning
+##max.depth = 6 0.524514
+##max.depth = 7 gave 0.514282
+##max.depth = 8 gave 0.508554
+##max.depth = 9 gave 0.504817
+##max.depth = 10, nrounds=50 gave 0.503991, nrounds = 57 gave 0.503269
+##max.depth = 11 gave 0.510535 <- overfitting
+
+importance_matrix <- xgb.importance(colnames(train), model = xgbfinalMod)
+xgb.plot.importance(importance_matrix)
+
+##Feature Engineering
+
+train = read.csv('ottotrain.csv')
+class = train$target
+train = train[,-c(1,95)]
+
+#rowsums
+train = cbind(train, rsum = rowSums(train))
+
+#counts of all unique numbers per row
+nums = unique(as.numeric(train)) #leave nums unchanged from train set
+
+p = matrix(ncol=length(nums))
+colnames(p) = nums
+for(i in 1:nrow(train)){
+j = sapply(nums, function(x) sum(x == train[i,]))
+p = rbind(p, j)
+}
+p = p[-1,]
+colnames(p) = sapply(colnames(p), function(x) paste0('Num', x))
+
+test = cbind(test, rsum = rowSums(test))
+test = cbind(test, p)
+
+write.csv(cbind(train, class), 'engineered1train.csv')
+
+#new model with engineered features made with nrounds = 53, max.depth = 10
+
+
