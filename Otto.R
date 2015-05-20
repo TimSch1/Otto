@@ -19,7 +19,7 @@ classSums = rowSums(eventrates[,-1])
 eventrates.mat = as.matrix(eventrates[,-1])
 normalized = sweep(eventrates.mat, 1, classSums, `/`)
 normalized = as.data.frame(cbind(targets = seq(1,9,1), normalized))
-eventrate_m = melt(eventrates, id='targets')
+eventrate_m = melt(eventrates, id='targets')classSu
 normalized_m = melt(normalized, id='targets')
 
 #event rate and normalized event-rate by class
@@ -69,26 +69,6 @@ heat.Med.small = select(heat.Med, idx)
 dev.off()
 heatmap.2(data.matrix(heat.Med.small), Rowv=TRUE, Colv=FALSE, scale='column', trace='none', 
           col=Col.Scale, margins = c(3,5), ylab='Class', xlab='Feature Median')
-
-#heatmap by class - doesn't work yet
-splitdf = split(train[,-94], train$target)
-freqbyclass = lapply(splitdf, function(x) lapply(x, table))
-freqbyclass = do.call(rbind, freqbyclass)
-lapply(freqbyclass, function(x) merge_recurse)
-
-
-for(j in 1:93){
-    freqbyclass = cbind(freqbyclass[[j]], feat = j)
-    }
-
-# Not useful, no additional class separation
-#library(psych)
-#pca.train = scale(train[,-c(94:95)])
-#pca.train = principal(pca.train, nfactors=10, covar=F)
-#pca.coords = as.data.frame(pca.train$scores)
-#subset = pca.coords[idx, ]
-#subset$targets = targets[idx]
-
 
 
 #Build LogLoss evaluation metric used by Kaggle
@@ -205,10 +185,10 @@ param <- list('objective' = 'multi:softprob',
               'eval_metric' = 'mlogloss',
               'num_class' = 9,
               'nthread' = 4,
-              'max.depth' = 10)
+              'max.depth' = 5)
 
 xgbmod.cv = xgb.cv(param=param, data = train, label = class, 
-                nfold = 3, nrounds=150)
+                nfold = 3, nrounds=200)
 
 xgbfinalMod = xgboost(param=param, data = train, label = class, nrounds=53)
 
@@ -237,30 +217,341 @@ xgb.plot.importance(importance_matrix)
 
 ##Feature Engineering
 
-train = read.csv('ottotrain.csv')
-class = train$target
+train = read.csv('engineered1train.csv')
+class = train$class
 train = train[,-c(1,95)]
 
-#rowsums
-train = cbind(train, rsum = rowSums(train))
 
 #counts of all unique numbers per row
-nums = unique(as.numeric(train)) #leave nums unchanged from train set
+nums = unique(as.numeric(as.matrix(train))) #leave nums unchanged from train set
 
 p = matrix(ncol=length(nums))
 colnames(p) = nums
-for(i in 1:nrow(train)){
-j = sapply(nums, function(x) sum(x == train[i,]))
-p = rbind(p, j)
+p = foreach(i = 1:nrow(train), .combine='rbind') %dopar% {
+    sapply(nums, function(x) sum(x == train[i,]))
 }
-p = p[-1,]
-colnames(p) = sapply(colnames(p), function(x) paste0('Num', x))
 
-test = cbind(test, rsum = rowSums(test))
-test = cbind(test, p)
+
+colnames(p) = sapply(nums, function(x) paste0('Num', x))
+
+train = cbind(train, rsum = rowSums(train)) #rowsums
+train = cbind(train, p)
 
 write.csv(cbind(train, class), 'engineered1train.csv')
 
-#new model with engineered features made with nrounds = 53, max.depth = 10
+test = read.csv('ottotest.csv')
+test = test[,-1]
+
+l = matrix(ncol=length(nums))
+colnames(l) = nums
+l = foreach(i = 1:nrow(test), .combine='rbind') %dopar% {
+  sapply(nums, function(x) sum(x == test[i,]))
+}
 
 
+colnames(l) = sapply(nums, function(x) paste0('Num', x))
+
+test = cbind(test, rsum = rowSums(test)) #rowsums
+test = cbind(test, l)
+
+write.csv(test, 'engineered1test.csv')
+
+stopCluster(cl)
+
+##New Model w/ features
+
+class = gsub('Class_','',class)
+class = as.numeric(train$target) - 1
+
+train = as.matrix(train)
+train = matrix(as.numeric(train), nrow = nrow(train), ncol=ncol(train))
+colnames(train) = colnames(test)
+test = as.matrix(test)
+test = matrix(as.numeric(test), nrow=nrow(test))
+colnames(test) = colnames(train)
+
+param <- list('objective' = 'multi:softprob',
+              'eval_metric' = 'mlogloss',
+              'num_class' = 9,
+              'nthread' = 4,
+              'max.depth' = 6)
+
+xgbmod.cv = xgb.cv(param=param, data = train, label = class, 
+                   nfold = 3, nrounds=130) #nround =56, max.depth=10, gives 0.494899
+
+xgbfinalMod = xgboost(param=param, data = train, label = class, nrounds=104)
+
+submit5 = predict(xgbfinalMod,test)
+submit5 = matrix(submit5,9,length(submit5)/9)
+submit5 = t(submit5)
+submit5 = as.data.frame(submit5)
+submit5 = cbind(id = 1:nrow(submit5), submit5)
+names(submit5) = c('id', paste0('Class_',1:9))
+write.csv(submit5, file='submit5.csv', quote=FALSE,row.names=FALSE)
+#scored 0.47704 not better than previous score
+
+#using ONLY most frequent feature counts
+train = train[,1:105]
+train = train[,-104]
+
+#retune -
+#max.depth = 11 gave nround(54) = 0.515250
+#max.depth = 10 gave nround(53) = 0.508982
+#max.depth = 9 gave nround(65) = 0.504933
+#max.depth = 8 gave nround(74) = 0.506664 
+#max.depth = 7 gave nround(104) = 0.499573 - submission score = 0.47365. new best (renamed this submit5.)
+#max.depth = 6 gave nround(130) = 0.500334
+
+
+#now tune with ALL new features
+#retune - 
+#max.depth = 10 gave nround(54) = 0.509774
+#max.depth = 9 gave nround(72) = 0.505913
+#max.depth = 8 gave nround(85) =  0.503530
+#max.depth = 7 gave nround(104) = 0.499491 - submit6 score = 0.47365. exactly the same as submit5.
+#max.depth = 6 gave nround(128) = 0.500250 (may benefit from more nrounds)
+
+submit6 = predict(xgbfinalMod,test)
+submit6 = matrix(submit6,9,length(submit6)/9)
+submit6 = t(submit6)
+submit6 = as.data.frame(submit6)
+submit6 = cbind(id = 1:nrow(submit6), submit6)
+names(submit6) = c('id', paste0('Class_',1:9))
+write.csv(submit6, file='submit6.csv', quote=FALSE,row.names=FALSE)
+
+
+xgb.save(xgbfinalMod, 'xgbfinalmodel')
+xgb.load('xgbfinalmodel')
+
+#follow code above to get training predictions, repredicted i know its problematic, classes 2&3 most often misclassified
+library(caret)
+pred_classes = sapply(1:nrow(trainpreds), function(x) which(trainpreds[x,] == max(trainpreds[x,])))
+pred_classes = paste0('Class_',as.character(pred_classes))
+confusionMatrix(pred_classes, classes)
+
+
+#plot overlapping classes 2 & 3 to look for differences
+p = cbind(p, classes)
+p = as.data.frame(p)
+class23 = p[p$classes == 2 | p$classes == 3,]
+class23 = class23[,order(colSums(class23), decreasing=T)] #order columns by frequency
+class23 = class23[,1:41] #only select features with frequencies >= 10, classes change at id = 16122-16123
+
+library(reshape2)
+library(ggplot2)
+class23$id = 1:nrow(class23)
+class23_m = melt(class23, id = c('id', 'classes'))
+ggplot(class23_m, aes(x=variable, y=id, fill=value))+ geom_tile()+geom_hline(aes(yintercept=16122))+
+  theme(axis.text.x = element_text(angle = 90, hjust=1))+ylab('Observations - Classes 2 & 3')+
+  scale_fill_continuous(high='darkred', low='white', name='Frequency')+xlab('')
+
+class23_m = class23_m[class23_m$variable != 'Num0' & class23_m$variable != 'Num1' & class23_m$variable != 'Num2' & class23_m$variable != 'Num3',]
+
+
+##svm for classes 2&3 - using all engineered features
+library(caret)
+train = train[train$class=='Class_2'|train$class=='Class_3',]
+idx = createDataPartition(train$class, p=0.40, list=F)
+svmTrain = train[idx,]
+svmTest = train[-idx,]
+
+svmMod = train(class~., data=svmTrain, method='svmRadial', preProc=c('center','scale'), tuneLength=10, trControl = trainControl(method='repeatedcv', repeats=5))
+
+
+
+
+
+#visualize in Eigenspace
+library(psych)
+train = read.csv('engineered1train.csv')
+pca.train = scale(train[,-c(1,247)], center=T, scale=T)
+pca.train = principal(pca.train, nfactors=10, covar=F)
+pca.coords = as.data.frame(pca.train$scores)
+pca.coords$class = factor(gsub('Class_','',train$class))
+
+library(rgl)
+class234 = pca.coords[pca.coords$class %in% c(2,3,4),]
+plot3d(class234[,2], class234[,1], class234[,3], col=class234$class)
+legend3d("topright", legend = paste('Class_', c('2', '3', '4')), pch=16, col = unique(class234$class), cex=1, inset=c(0.02))
+
+#see if SVM model separates classes
+library(doParallel)
+cl = makeCluster(4)
+registerDoParallel(cl)
+
+sigmaRangeReduced <- sigest(as.matrix(pca.coords[,-ncol(pca.coords)])) 
+svmRGridReduced <- expand.grid(.sigma = sigmaRangeReduced[1], .C = 2^(seq(-4, 4)))
+
+ctrl = trainControl(method='repeatedcv', repeats = 5, classProbs=TRUE, summaryFunction=mcLogLoss)
+
+mcLogLoss <- function (data,
+                       lev = NULL,
+                       model = NULL) {
+  
+  if (!all(levels(data[, "pred"]) == levels(data[, "obs"])))
+    stop("levels of observed and predicted data do not match")
+  
+  LogLoss <- function(actual, pred, err=1e-15) {
+    pred[pred < err] <- err
+    pred[pred > 1 - err] <- 1 - err
+    -1/nrow(actual)*(sum(actual*log(pred)))
+  }
+  
+  dtest <- dummyVars(~obs, data=data, levelsOnly=TRUE)
+  actualClasses <- predict(dtest, data[,-1])
+  
+  out <- LogLoss(actualClasses, data[,-c(1:2)])  
+  names(out) <- "mcLogLoss"
+  out
+} 
+
+svmMod = train(pca.coords[,-ncol(pca.coords)], pca.coords$class,
+               method = 'svmRadial', metric='mcLogLoss',
+               tuneGrid = svmRGridReduced,
+               fit = FALSE, trControl=ctrl, maximize=FALSE)
+
+head(pca.coords)
+
+stopCluster(cl)
+
+
+library(h2o)
+localH2O <- h2o.init(nthread=4, Xmx='8g')
+
+train <- read.csv("ottotrain.csv")
+
+#used for blending only
+library(caret)
+idx = createDataPartition(train$target, p=0.85, list=FALSE)
+train = train[idx,]
+test = train[-idx,]
+
+for(i in 2:94){
+  train[,i] <- as.numeric(train[,i])
+  train[,i] <- sqrt(train[,i]+(3/8))
+}
+
+#not used for blending
+test <- read.csv("ottotest.csv")
+
+for(i in 2:94){
+  test[,i] <- as.numeric(test[,i])
+  test[,i] <- sqrt(test[,i]+(3/8))
+}
+
+
+
+train.hex <- as.h2o(localH2O,train)
+test.hex <- as.h2o(localH2O,test[,2:94])
+
+predictors <- 2:(ncol(train.hex)-1)
+response <- ncol(train.hex)
+
+submission <- read.csv("sampleSubmission.csv")
+submission[,2:10] <- 0
+
+for(i in 1:20){
+  print(i)
+  model <- h2o.deeplearning(x=predictors,
+                            y=response,
+                            data=train.hex,
+                            classification=T,
+                            activation="RectifierWithDropout",
+                            hidden=c(1024,512,256),
+                            hidden_dropout_ratio=c(0.5,0.5,0.5),
+                            input_dropout_ratio=0.05,
+                            epochs=100,
+                            l1=1e-5,
+                            l2=1e-5,
+                            rho=0.99,
+                            epsilon=1e-8,
+                            train_samples_per_iteration=2000,
+                            max_w2=10,
+                            seed=1)
+  
+  submission[,2:10] <- submission[,2:10] + as.data.frame(h2o.predict(model,test.hex))[,2:10]
+  print(i)
+  write.csv(submission,file="submission.csv",row.names=FALSE) 
+}   
+submission = read.csv('submission.csv')
+
+subSums = rowSums(submission[,-1])
+submissionNormed = sweep(as.matrix(submission[,-1]), 1, subSums, `/`)
+colnames(submissionNormed) = paste0(rep('Class_',9),1:9)
+submissionNormed = as.data.frame(submissionNormed)
+submissionNormed$obs = test$target
+LogLoss(submissionNormed) #0.88
+
+write.csv(train, 'trainforcv.csv')
+write.csv(test, 'testforcv.csv')
+
+pred_classes = apply(submissionNormed[,-ncol(submissionNormed)], 1, function(x) which(x == max(x)))
+pred_classes = paste0('Class_',as.character(pred_classes))
+confusionMatrix(pred_classes, submissionNormed$obs)
+
+#used trainforcv and testforcv. otherwise used script above
+
+param <- list('objective' = 'multi:softprob',
+              'eval_metric' = 'mlogloss',
+              'num_class' = 9,
+              'nthread' = 4,
+              'max.depth' = 7)
+
+xgbfinalMod = xgboost(param=param, data = train, label = class, 
+                   nfold = 3, nrounds=385, eta=0.1, colsample.bytree=0.5)
+
+#max.depth = 5, nround = 609, eta=0.1, colsample.bytree=1, test ll= 0.490782
+#max.depth = 5, nround = 704, eta=0.1, colsample.bytree=0.5, test ll= 0.485484
+#max.depth = 5, nround = 871, eta=0.1, colsample.bytree=0.25, test ll= 0.485374
+
+
+#max.depth = 6, nround = 444, eta=0.1, colsample.bytree=1, test ll= 0.489010
+#max.depth = 6, nround = 523, eta=0.1, colsample.bytree=0.5, test ll= 0.482306
+#max.depth = 6, nround = 631, eta=0.1, colsample.bytree=0.25, test ll= 0.483093
+
+ 
+#max.depth = 7, nround = 341, eta=0.1, colsample.bytree=1, test ll= 0.490034
+#max.depth = 7, nround = 385, eta=0.1, colsample.bytree=0.5, test ll= 0.481144** submission8 score = 0.45702 score
+#max.depth = 7, nround = 429, eta=0.1, colsample.bytree=0.25, test ll= 0.484539 
+
+xgbfinalMod = xgboost(param=param, data = train, label = class, nrounds=385, eta=0.1, colsample.bytree=0.5)#0.45702 
+xgbfinalMod = xgboost(param=param, data = train, label = class, nrounds=463, eta=0.085, colsample.bytree=0.45)#0.45671
+xgbfinalMod = xgboost(param=param, data = train, label = class, nrounds=494, eta=0.08, colsample.bytree=0.45)# 0.45637
+
+
+submit10 = predict(xgbfinalMod,test)
+submit10 = matrix(submit10,9,length(submit10)/9)
+submit10 = t(submit10)
+submit10 = as.data.frame(submit10)
+submit10 = cbind(id = 1:nrow(submit10), submit10)
+names(submit10) = c('id', paste0('Class_',1:9))
+write.csv(submit10, file='submit10.csv', quote=FALSE,row.names=FALSE)
+
+xgbmod.cv = xgb.cv(param=param, data = train, label = class, 
+                   nfold = 3, nrounds=1200, eta=0.075, colsample.bytree=0.45)
+
+#max.depth = 7, nround = 379, eta=0.11, colsample.bytree=0.35, test ll= 0.482658
+#max.depth = 7, nround = 519, eta=0.11, colsample.bytree=0.15, test ll= 0.489333
+#max.depth = 7, nround = 461, eta=0.09, colsample.bytree=0.35, test ll= 0.480999
+#max.depth = 7, nround = 611, eta=0.09, colsample.bytree=0.15, test ll= 0.486262
+#max.depth = 7, nround = 492, eta=0.085, colsample.bytree=0.35, test ll= 0.480797
+#max.depth = 7, nround = 463, eta=0.085, colsample.bytree=0.45, test ll= 0.480152**submission9 - scored 0.45671
+#max.depth = 7, nround = 469, eta=0.085, colsample.bytree=0.40, test ll= 0.481215
+#max.depth = 7, nround = 544, eta=0.075, colsample.bytree=0.35, test ll= 0.480764
+#max.depth = 7, nround = 543, eta=0.08, colsample.bytree=0.35, test ll= 0.482171
+#max.depth = 7, nround = 494, eta=0.08, colsample.bytree=0.45, test ll= 0.479735** new best cv score
+#max.depth = 7, nround = 533, eta=0.075, colsample.bytree=0.45, test ll= 0.480853
+
+
+
+submitblendtune = predict(xgbfinalblendMod,test)
+submitblendtune = matrix(submitblendtune,9,length(submitblendtune)/9)
+submitblendtune = t(submitblendtune)
+submitblendtune = as.data.frame(submitblendtune)
+names(submitblendtune) = paste0('Class_',1:9)
+write.csv(submitblendtune, file='xgbblendmod.csv', quote=FALSE,row.names=FALSE)
+
+xgbpred_classes = apply(submitblendtune, 1, function(x) which(x == max(x)))
+xgbpred_classes = paste0('Class_',as.character(xgbpred_classes))
+
+confusionMatrix(xgbpred_classes, labels)
